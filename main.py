@@ -11,54 +11,56 @@ LOCAL_TZ = ZoneInfo("Asia/Colombo")
 
 
 def extract_usd_futures():
-    """Read the visible USD Futures ranking section from Binance's web page."""
+    """Read the visible USDⓈ-M Futures ranking section from Binance's web page."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = browser.new_page(
-            viewport={"width": 1440, "height": 1100},
+            viewport={"width": 1440, "height": 1400},
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             ),
         )
         page.goto(BINANCE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(9000)
+        page.wait_for_timeout(12000)
         body_text = page.locator("body").inner_text(timeout=30000)
         browser.close()
 
-    # Binance may label this section "USD Futures" or "USDⓈ-M Futures".
-    heading_match = re.search(r"USD(?:Ⓢ-M)? Futures", body_text, flags=re.IGNORECASE)
-    if not heading_match:
-        raise RuntimeError("Could not find the USD Futures section on the Binance page.")
+    # Binance can include repeated/hidden section labels in its page text.
+    # Test every USD Futures heading and use the occurrence containing the
+    # largest block of ranking data before the Coin Futures section.
+    heading_pattern = re.compile(r"USD(?:Ⓢ-M)?\s+Futures", re.IGNORECASE)
+    candidates = []
+    for heading in heading_pattern.finditer(body_text):
+        tail = body_text[heading.end():]
+        next_section = re.search(
+            r"\n\s*(?:Coin\s+Futures|COIN-M\s+Futures|Options)\s*\n",
+            tail,
+            re.IGNORECASE,
+        )
+        section = tail[:next_section.start()] if next_section else tail
+        if re.search(r"\bPerpetual\b", section, re.IGNORECASE):
+            candidates.append(section)
 
-    section_text = body_text[heading_match.end():]
-    next_section = re.search(r"\n\s*(?:Coin Futures|COIN-M Futures|Options)\s*\n", section_text, re.I)
-    if next_section:
-        section_text = section_text[:next_section.start()]
+    if not candidates:
+        # Fallback: Binance's current label is USDⓈ-M Futures.
+        raise RuntimeError(
+            "Could not locate visible USDⓈ-M Futures rows. "
+            "Binance may have blocked the automated browser or changed the page."
+        )
 
+    section_text = max(candidates, key=len)
     lines = [line.strip() for line in section_text.splitlines() if line.strip()]
-
-    # Remove the column headings if they are present.
-    while lines and lines[0].lower() in {"name", "price", "change", "24h change"}:
-        lines.pop(0)
 
     rows = []
     i = 0
-    while i < len(lines):
-        if not re.fullmatch(r"\d+", lines[i]):
-            i += 1
-            continue
-
-        # Expected visible row: rank, symbol, contract, price, percentage change.
-        if i + 4 >= len(lines):
-            break
-
+    while i + 4 < len(lines):
         rank, symbol, contract, price, change = lines[i:i + 5]
         if (
             re.fullmatch(r"\d+", rank)
-            and re.fullmatch(r"[A-Z0-9._-]+", symbol, re.I)
-            and re.search(r"USDT|USD", symbol, re.I)
-            and re.search(r"Perpetual|Quarterly|Monthly|Delivery", contract, re.I)
+            and re.fullmatch(r"[A-Z0-9._-]+", symbol, re.IGNORECASE)
+            and re.search(r"USDT|USD", symbol, re.IGNORECASE)
+            and re.search(r"Perpetual|Quarterly|Monthly|Delivery", contract, re.IGNORECASE)
             and re.search(r"\d", price)
             and re.fullmatch(r"[+-]?\d+(?:\.\d+)?%", change)
         ):
@@ -74,10 +76,10 @@ def extract_usd_futures():
             i += 1
 
     if len(rows) < 10:
-        preview = "\n".join(lines[:80])
+        preview = "\\n".join(lines[:100])
         raise RuntimeError(
             f"Expected 10 USD Futures rows but extracted {len(rows)}. "
-            f"Binance page layout may have changed. Section preview:\n{preview}"
+            f"Selected section preview:\\n{preview}"
         )
 
     return rows[:10]
